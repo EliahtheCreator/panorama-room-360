@@ -252,6 +252,11 @@
         <option value="120">120°</option>
         <option value="90">90°</option>
       </select>
+      <select class="pano-select" id="pano-quality" aria-label="stitching quality mode">
+        <option value="sharp" selected>清晰优先</option>
+        <option value="balanced">均衡</option>
+        <option value="smooth">平滑优先</option>
+      </select>
       <button class="pano-button primary" id="pano-build" type="button">生成全景</button>
       <label class="pano-file-label" for="pano-file">换视频</label>
       <input id="pano-file" type="file" accept="video/*">
@@ -293,6 +298,7 @@
       const saveButton = document.getElementById('pano-save');
       const fileInput = document.getElementById('pano-file');
       const angleSelect = document.getElementById('pano-angle');
+      const qualitySelect = document.getElementById('pano-quality');
       const statusBox = document.getElementById('pano-status');
       const statusText = document.getElementById('pano-status-text');
       const statusCount = document.getElementById('pano-status-count');
@@ -419,20 +425,21 @@
         return frame;
       }
 
-      function drawFeatheredFrame(frame, x, y, width, height, index, total) {
+      function drawFeatheredFrame(frame, x, y, width, height, index, total, edgeFraction = 0.14, alpha = 1) {
         frameLayer.width = Math.ceil(width);
         frameLayer.height = Math.ceil(height);
         frameLayerCtx.clearRect(0, 0, frameLayer.width, frameLayer.height);
         frameLayerCtx.globalCompositeOperation = 'source-over';
-        frameLayerCtx.globalAlpha = 1;
+        frameLayerCtx.globalAlpha = alpha;
         frameLayerCtx.drawImage(frame, 0, 0, frameLayer.width, frameLayer.height);
+        frameLayerCtx.globalAlpha = 1;
 
         const fade = frameLayerCtx.createLinearGradient(0, 0, frameLayer.width, 0);
         const leftEdge = index === 0 ? 1 : 0;
         const rightEdge = index === total - 1 ? 1 : 0;
         fade.addColorStop(0, `rgba(0,0,0,${leftEdge})`);
-        fade.addColorStop(0.14, 'rgba(0,0,0,1)');
-        fade.addColorStop(0.86, 'rgba(0,0,0,1)');
+        fade.addColorStop(edgeFraction, 'rgba(0,0,0,1)');
+        fade.addColorStop(1 - edgeFraction, 'rgba(0,0,0,1)');
         fade.addColorStop(1, `rgba(0,0,0,${rightEdge})`);
         frameLayerCtx.globalCompositeOperation = 'destination-in';
         frameLayerCtx.fillStyle = fade;
@@ -440,6 +447,29 @@
         frameLayerCtx.globalCompositeOperation = 'source-over';
 
         stripCtx.drawImage(frameLayer, x, y);
+      }
+
+      function selectFrameIndices(offsets, frameWidth, mode) {
+        const indices = [0];
+        const thresholds = {
+          sharp: frameWidth * 0.32,
+          balanced: frameWidth * 0.22,
+          smooth: frameWidth * 0.12
+        };
+        const threshold = thresholds[mode] || thresholds.sharp;
+        let lastOffset = offsets[0] || 0;
+
+        for (let i = 1; i < offsets.length - 1; i += 1) {
+          if (Math.abs(offsets[i] - lastOffset) >= threshold) {
+            indices.push(i);
+            lastOffset = offsets[i];
+          }
+        }
+
+        if (offsets.length > 1 && indices[indices.length - 1] !== offsets.length - 1) {
+          indices.push(offsets.length - 1);
+        }
+        return indices;
       }
 
       function drawPlaceholder() {
@@ -596,6 +626,14 @@
         const panoHeight = Math.round(workingHeight * outputScale);
         const frameWidth = Math.round(workingWidth * outputScale);
         const frameHeight = Math.round(workingHeight * outputScale);
+        const qualityMode = qualitySelect.value;
+        const selectedIndices = selectFrameIndices(offsets, frameWidth / outputScale, qualityMode);
+        const edgeFractions = {
+          sharp: 0.07,
+          balanced: 0.12,
+          smooth: 0.2
+        };
+        const edgeFraction = edgeFractions[qualityMode] || edgeFractions.sharp;
 
         stripCanvas.width = panoWidth;
         stripCanvas.height = panoHeight;
@@ -603,18 +641,21 @@
         stripCtx.fillStyle = '#05070a';
         stripCtx.fillRect(0, 0, panoWidth, panoHeight);
 
-        stripCtx.globalAlpha = 0.24;
-        for (let i = 0; i < frames.length; i += 1) {
-          const x = Math.round((offsets[i] - minOffset + padding) * outputScale);
-          stripCtx.drawImage(frames[i], x, 0, frameWidth, frameHeight);
+        if (qualityMode === 'smooth') {
+          stripCtx.globalAlpha = 0.18;
+          for (const index of selectedIndices) {
+            const x = Math.round((offsets[index] - minOffset + padding) * outputScale);
+            stripCtx.drawImage(frames[index], x, 0, frameWidth, frameHeight);
+          }
+          stripCtx.globalAlpha = 1;
         }
-        stripCtx.globalAlpha = 1;
 
-        for (let i = 0; i < frames.length; i += 1) {
-          const x = Math.round((offsets[i] - minOffset + padding) * outputScale);
-          drawFeatheredFrame(frames[i], x, 0, frameWidth, frameHeight, i, frames.length);
-          if (i % 2 === 0 || i === frames.length - 1) {
-            setProgress('融合全景照片', 0.58 + (i + 1) / frames.length * 0.42);
+        for (let i = 0; i < selectedIndices.length; i += 1) {
+          const frameIndex = selectedIndices[i];
+          const x = Math.round((offsets[frameIndex] - minOffset + padding) * outputScale);
+          drawFeatheredFrame(frames[frameIndex], x, 0, frameWidth, frameHeight, i, selectedIndices.length, edgeFraction, 1);
+          if (i % 2 === 0 || i === selectedIndices.length - 1) {
+            setProgress('融合全景照片', 0.58 + (i + 1) / selectedIndices.length * 0.42);
             await new Promise(requestAnimationFrame);
           }
         }
@@ -628,7 +669,8 @@
         panoReady = true;
         saveButton.disabled = false;
         const motionLabel = totalMotion < workingWidth * 0.25 ? '镜头移动较小' : `估算约 ${captureDegrees}°`;
-        meta.textContent = `自动范围 · ${motionLabel} · ${sampleCount} 帧对齐 · ${stripCanvas.width}×${stripCanvas.height} 全景照片`;
+        const qualityLabel = qualitySelect.options[qualitySelect.selectedIndex].textContent;
+        meta.textContent = `自动范围 · ${qualityLabel} · ${motionLabel} · ${selectedIndices.length}/${sampleCount} 帧融合 · ${stripCanvas.width}×${stripCanvas.height} 全景照片`;
         setProgress('全景已生成', 1);
         render();
       }
