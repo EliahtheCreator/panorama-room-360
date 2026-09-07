@@ -245,7 +245,8 @@
 
     <section class="pano-controls" aria-label="scene controls">
       <select class="pano-select" id="pano-angle" aria-label="video capture angle">
-        <option value="360" selected>360°</option>
+        <option value="auto" selected>自动范围</option>
+        <option value="360">360°</option>
         <option value="270">270°</option>
         <option value="180">180°</option>
         <option value="120">120°</option>
@@ -286,6 +287,8 @@
       const stripCtx = stripCanvas.getContext('2d');
       const sliceCanvas = document.createElement('canvas');
       const sliceCtx = sliceCanvas.getContext('2d');
+      const frameLayer = document.createElement('canvas');
+      const frameLayerCtx = frameLayer.getContext('2d');
       const buildButton = document.getElementById('pano-build');
       const saveButton = document.getElementById('pano-save');
       const fileInput = document.getElementById('pano-file');
@@ -301,7 +304,8 @@
       let yaw = 0;
       let pitch = 0.5;
       let fov = 82;
-      let captureDegrees = Number(angleSelect.value);
+      let captureDegrees = 180;
+      let buildMode = angleSelect.value;
       let isDragging = false;
       let lastX = 0;
       let lastY = 0;
@@ -355,6 +359,87 @@
         const done = waitFor(video, 'seeked');
         video.currentTime = time;
         await done;
+      }
+
+      function makeFeature() {
+        const featureWidth = 96;
+        const featureHeight = 54;
+        const cropTop = Math.round(sourceCanvas.height * 0.18);
+        const cropHeight = Math.round(sourceCanvas.height * 0.64);
+        const featureCanvas = document.createElement('canvas');
+        const featureCtx = featureCanvas.getContext('2d', { willReadFrequently: true });
+        featureCanvas.width = featureWidth;
+        featureCanvas.height = featureHeight;
+        featureCtx.drawImage(sourceCanvas, 0, cropTop, sourceCanvas.width, cropHeight, 0, 0, featureWidth, featureHeight);
+        const pixels = featureCtx.getImageData(0, 0, featureWidth, featureHeight).data;
+        const values = new Uint8Array(featureWidth * featureHeight);
+        for (let i = 0, j = 0; i < pixels.length; i += 4, j += 1) {
+          values[j] = (pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114) | 0;
+        }
+        return { values, width: featureWidth, height: featureHeight };
+      }
+
+      function estimateHorizontalShift(previous, current) {
+        const w = previous.width;
+        const h = previous.height;
+        const maxShift = Math.round(w * 0.34);
+        let bestShift = 0;
+        let bestScore = Number.POSITIVE_INFINITY;
+
+        for (let shift = -maxShift; shift <= maxShift; shift += 1) {
+          const startX = Math.max(0, -shift);
+          const endX = Math.min(w, w - shift);
+          if (endX - startX < w * 0.42) continue;
+          let score = 0;
+          let count = 0;
+
+          for (let y = 3; y < h - 3; y += 3) {
+            const row = y * w;
+            for (let x = startX; x < endX; x += 2) {
+              score += Math.abs(previous.values[row + x] - current.values[row + x + shift]);
+              count += 1;
+            }
+          }
+
+          const normalized = score / Math.max(1, count);
+          if (normalized < bestScore) {
+            bestScore = normalized;
+            bestShift = shift;
+          }
+        }
+
+        return -bestShift * (sourceCanvas.width / w);
+      }
+
+      function cloneSourceFrame() {
+        const frame = document.createElement('canvas');
+        frame.width = sourceCanvas.width;
+        frame.height = sourceCanvas.height;
+        frame.getContext('2d').drawImage(sourceCanvas, 0, 0);
+        return frame;
+      }
+
+      function drawFeatheredFrame(frame, x, y, width, height, index, total) {
+        frameLayer.width = Math.ceil(width);
+        frameLayer.height = Math.ceil(height);
+        frameLayerCtx.clearRect(0, 0, frameLayer.width, frameLayer.height);
+        frameLayerCtx.globalCompositeOperation = 'source-over';
+        frameLayerCtx.globalAlpha = 1;
+        frameLayerCtx.drawImage(frame, 0, 0, frameLayer.width, frameLayer.height);
+
+        const fade = frameLayerCtx.createLinearGradient(0, 0, frameLayer.width, 0);
+        const leftEdge = index === 0 ? 1 : 0;
+        const rightEdge = index === total - 1 ? 1 : 0;
+        fade.addColorStop(0, `rgba(0,0,0,${leftEdge})`);
+        fade.addColorStop(0.14, 'rgba(0,0,0,1)');
+        fade.addColorStop(0.86, 'rgba(0,0,0,1)');
+        fade.addColorStop(1, `rgba(0,0,0,${rightEdge})`);
+        frameLayerCtx.globalCompositeOperation = 'destination-in';
+        frameLayerCtx.fillStyle = fade;
+        frameLayerCtx.fillRect(0, 0, frameLayer.width, frameLayer.height);
+        frameLayerCtx.globalCompositeOperation = 'source-over';
+
+        stripCtx.drawImage(frameLayer, x, y);
       }
 
       function drawPlaceholder() {
@@ -418,7 +503,7 @@
       }
 
       function clampYaw(value) {
-        if (captureDegrees >= 360) {
+        if (buildMode !== 'auto' && captureDegrees >= 360) {
           let wrapped = value % 1;
           if (wrapped < 0) wrapped += 1;
           return wrapped;
@@ -447,7 +532,7 @@
         const sy = Math.max(0, Math.min(ph - sourceH, pitch * ph - sourceH / 2));
 
         ctx.clearRect(0, 0, vw, vh);
-        if (captureDegrees >= 360) {
+        if (buildMode !== 'auto' && captureDegrees >= 360) {
           drawWrappedImage(sx, sy, sourceW, sourceH, 0, 0, vw, vh);
         } else {
           ctx.drawImage(stripCanvas, sourceX, sy, sourceW, sourceH, 0, 0, vw, vh);
@@ -458,6 +543,94 @@
         vignette.addColorStop(1, 'rgba(0,0,0,0.22)');
         ctx.fillStyle = vignette;
         ctx.fillRect(0, 0, vw, vh);
+      }
+
+      async function buildAutoPanorama() {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const duration = Math.max(0.1, video.duration || 0.1);
+        const sampleCount = Math.min(84, Math.max(32, Math.round(duration * 8)));
+        const workingHeight = Math.min(vh, 720);
+        const scale = workingHeight / vh;
+        const workingWidth = Math.max(1, Math.round(vw * scale));
+        const frames = [];
+        const offsets = [];
+        let previousFeature = null;
+        let currentOffset = 0;
+        let totalMotion = 0;
+
+        sourceCanvas.width = workingWidth;
+        sourceCanvas.height = workingHeight;
+
+        for (let i = 0; i < sampleCount; i += 1) {
+          const t = duration * ((i + 0.5) / sampleCount);
+          await seekTo(Math.min(duration - 0.03, Math.max(0.03, t)));
+          sourceCtx.drawImage(video, 0, 0, workingWidth, workingHeight);
+
+          const feature = makeFeature();
+          if (previousFeature) {
+            let delta = estimateHorizontalShift(previousFeature, feature);
+            const maxDelta = workingWidth * 0.3;
+            delta = Math.max(-maxDelta, Math.min(maxDelta, delta));
+            if (Math.abs(delta) < 1.5) delta = 0;
+            currentOffset += delta;
+            totalMotion += Math.abs(delta);
+          }
+          previousFeature = feature;
+          offsets.push(currentOffset);
+          frames.push(cloneSourceFrame());
+
+          if (i % 2 === 0 || i === sampleCount - 1) {
+            setProgress('自动分析镜头范围', (i + 1) / sampleCount * 0.58);
+            await new Promise(requestAnimationFrame);
+          }
+        }
+
+        const minOffset = Math.min(...offsets);
+        const maxOffset = Math.max(...offsets);
+        const rawWidth = Math.max(workingWidth, maxOffset - minOffset + workingWidth);
+        const padding = Math.max(24, Math.round(workingWidth * 0.04));
+        const maxOutputWidth = 12000;
+        const outputScale = Math.min(1, maxOutputWidth / (rawWidth + padding * 2));
+        const panoWidth = Math.round((rawWidth + padding * 2) * outputScale);
+        const panoHeight = Math.round(workingHeight * outputScale);
+        const frameWidth = Math.round(workingWidth * outputScale);
+        const frameHeight = Math.round(workingHeight * outputScale);
+
+        stripCanvas.width = panoWidth;
+        stripCanvas.height = panoHeight;
+        stripCtx.clearRect(0, 0, panoWidth, panoHeight);
+        stripCtx.fillStyle = '#05070a';
+        stripCtx.fillRect(0, 0, panoWidth, panoHeight);
+
+        stripCtx.globalAlpha = 0.24;
+        for (let i = 0; i < frames.length; i += 1) {
+          const x = Math.round((offsets[i] - minOffset + padding) * outputScale);
+          stripCtx.drawImage(frames[i], x, 0, frameWidth, frameHeight);
+        }
+        stripCtx.globalAlpha = 1;
+
+        for (let i = 0; i < frames.length; i += 1) {
+          const x = Math.round((offsets[i] - minOffset + padding) * outputScale);
+          drawFeatheredFrame(frames[i], x, 0, frameWidth, frameHeight, i, frames.length);
+          if (i % 2 === 0 || i === frames.length - 1) {
+            setProgress('融合全景照片', 0.58 + (i + 1) / frames.length * 0.42);
+            await new Promise(requestAnimationFrame);
+          }
+        }
+
+        const sourceFovGuess = 72;
+        captureDegrees = Math.round(Math.min(360, Math.max(sourceFovGuess, sourceFovGuess * (panoWidth / Math.max(1, frameWidth)))));
+        buildMode = 'auto';
+        yaw = 0.5;
+        pitch = 0.5;
+        fov = Math.min(82, captureDegrees);
+        panoReady = true;
+        saveButton.disabled = false;
+        const motionLabel = totalMotion < workingWidth * 0.25 ? '镜头移动较小' : `估算约 ${captureDegrees}°`;
+        meta.textContent = `自动范围 · ${motionLabel} · ${sampleCount} 帧对齐 · ${stripCanvas.width}×${stripCanvas.height} 全景照片`;
+        setProgress('全景已生成', 1);
+        render();
       }
 
       async function buildPanorama() {
@@ -471,9 +644,15 @@
 
         try {
           await ensureMetadata();
+          if (angleSelect.value === 'auto') {
+            await buildAutoPanorama();
+            return;
+          }
+
           const vw = video.videoWidth;
           const vh = video.videoHeight;
           const duration = Math.max(0.1, video.duration || 0.1);
+          buildMode = 'manual';
           captureDegrees = Number(angleSelect.value);
           const isClosedLoop = captureDegrees >= 360;
           const sampleCount = Math.min(420, Math.max(220, Math.round(duration * 24)));
@@ -572,11 +751,15 @@
       buildButton.addEventListener('click', buildPanorama);
 
       angleSelect.addEventListener('change', () => {
-        captureDegrees = Number(angleSelect.value);
-        fov = Math.min(fov, captureDegrees);
+        buildMode = angleSelect.value === 'auto' ? 'auto' : 'manual';
+        if (buildMode !== 'auto') {
+          captureDegrees = Number(angleSelect.value);
+          fov = Math.min(fov, captureDegrees);
+        }
         yaw = clampYaw(yaw);
         if (panoReady) {
-          meta.textContent = `${captureDegrees}° · ${stripCanvas.width}×${stripCanvas.height} 全景纹理`;
+          const prefix = buildMode === 'auto' ? '自动范围' : `${captureDegrees}°`;
+          meta.textContent = `${prefix} · ${stripCanvas.width}×${stripCanvas.height} 全景照片`;
           render();
         }
       });
@@ -584,7 +767,7 @@
       saveButton.addEventListener('click', () => {
         if (!panoReady) return;
         const link = document.createElement('a');
-        link.download = 'panorama-strip.jpg';
+        link.download = 'panorama-photo.jpg';
         link.href = stripCanvas.toDataURL('image/jpeg', 0.92);
         link.click();
       });
