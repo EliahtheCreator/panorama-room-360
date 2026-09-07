@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>360 圆柱全景场景</title>
+</head>
+<body>
+<div id="panorama-app">
+  <style>
+    #panorama-app {
+      --ink: #f7f3ea;
+      --muted: #c8d1d7;
+      --panel: rgba(9, 13, 18, 0.76);
+      --line: rgba(255, 255, 255, 0.16);
+      --accent: #f0b35b;
+      --accent-2: #67d5c0;
+      --danger: #ff7b7b;
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      background: #05070a;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #panorama-app * {
+      box-sizing: border-box;
+    }
+
+    #pano-view {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+      touch-action: none;
+      background: radial-gradient(circle at 50% 45%, #18212b, #05070a 68%);
+    }
+
+    #pano-view:active {
+      cursor: grabbing;
+    }
+
+    .pano-topbar {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      right: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      pointer-events: none;
+      z-index: 4;
+    }
+
+    .pano-brand,
+    .pano-controls,
+    .pano-status {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+    }
+
+    .pano-brand {
+      min-width: 0;
+      max-width: min(560px, 58vw);
+      padding: 12px 14px;
+      border-radius: 8px;
+    }
+
+    .pano-title {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .pano-meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .pano-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      pointer-events: auto;
+    }
+
+    .pano-button,
+    .pano-file-label {
+      min-height: 36px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      line-height: 34px;
+      cursor: pointer;
+    }
+
+    .pano-button.primary {
+      border-color: rgba(240, 179, 91, 0.72);
+      background: rgba(240, 179, 91, 0.18);
+    }
+
+    .pano-button:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    #pano-file {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .pano-status {
+      position: absolute;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      width: min(520px, calc(100vw - 32px));
+      border-radius: 8px;
+      padding: 12px 14px;
+      z-index: 4;
+    }
+
+    .pano-status-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .pano-progress {
+      margin-top: 10px;
+      height: 5px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .pano-progress-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 160ms ease;
+    }
+
+    .pano-status.ready {
+      width: auto;
+      padding: 9px 12px;
+    }
+
+    .pano-status.ready .pano-progress {
+      display: none;
+    }
+
+    .pano-corner {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 3;
+      color: rgba(247, 243, 234, 0.72);
+      font-size: 12px;
+      text-shadow: 0 1px 8px rgba(0, 0, 0, 0.65);
+      pointer-events: none;
+    }
+
+    video,
+    #pano-source,
+    #pano-strip {
+      display: none;
+    }
+
+    @media (max-width: 720px) {
+      .pano-topbar {
+        top: 12px;
+        left: 12px;
+        right: 12px;
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .pano-brand {
+        max-width: none;
+      }
+
+      .pano-controls {
+        align-self: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .pano-corner {
+        display: none;
+      }
+    }
+  </style>
+
+  <canvas id="pano-view" aria-label="360 panorama viewer"></canvas>
+
+  <div class="pano-topbar">
+    <section class="pano-brand" aria-label="scene information">
+      <h1 class="pano-title">360 圆柱全景场景</h1>
+      <div class="pano-meta" id="pano-meta">读取同目录视频 source.mp4</div>
+    </section>
+
+    <section class="pano-controls" aria-label="scene controls">
+      <button class="pano-button primary" id="pano-build" type="button">生成全景</button>
+      <label class="pano-file-label" for="pano-file">换视频</label>
+      <input id="pano-file" type="file" accept="video/*">
+      <button class="pano-button" id="pano-save" type="button" disabled>保存全景图</button>
+    </section>
+  </div>
+
+  <section class="pano-status" id="pano-status" aria-live="polite">
+    <div class="pano-status-row">
+      <span id="pano-status-text">等待生成</span>
+      <span id="pano-status-count">0%</span>
+    </div>
+    <div class="pano-progress" aria-hidden="true">
+      <div class="pano-progress-fill" id="pano-progress-fill"></div>
+    </div>
+  </section>
+
+  <div class="pano-corner">拖动改变视角 · 滚轮缩放</div>
+
+  <video id="pano-video" src="source.mp4" preload="metadata" playsinline muted></video>
+  <canvas id="pano-source"></canvas>
+  <canvas id="pano-strip"></canvas>
+
+  <script>
+    (() => {
+      const root = document.getElementById('panorama-app');
+      const view = document.getElementById('pano-view');
+      const ctx = view.getContext('2d');
+      const video = document.getElementById('pano-video');
+      const sourceCanvas = document.getElementById('pano-source');
+      const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
+      const stripCanvas = document.getElementById('pano-strip');
+      const stripCtx = stripCanvas.getContext('2d');
+      const sliceCanvas = document.createElement('canvas');
+      const sliceCtx = sliceCanvas.getContext('2d');
+      const buildButton = document.getElementById('pano-build');
+      const saveButton = document.getElementById('pano-save');
+      const fileInput = document.getElementById('pano-file');
+      const statusBox = document.getElementById('pano-status');
+      const statusText = document.getElementById('pano-status-text');
+      const statusCount = document.getElementById('pano-status-count');
+      const progressFill = document.getElementById('pano-progress-fill');
+      const meta = document.getElementById('pano-meta');
+
+      let panoReady = false;
+      let isBuilding = false;
+      let yaw = 0;
+      let pitch = 0.5;
+      let fov = 82;
+      let isDragging = false;
+      let lastX = 0;
+      let lastY = 0;
+      let animationId = 0;
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const width = Math.max(1, Math.floor(root.clientWidth * dpr));
+        const height = Math.max(1, Math.floor(root.clientHeight * dpr));
+        if (view.width !== width || view.height !== height) {
+          view.width = width;
+          view.height = height;
+        }
+        render();
+      }
+
+      function setProgress(text, value) {
+        const percent = Math.round(Math.max(0, Math.min(1, value)) * 100);
+        statusText.textContent = text;
+        statusCount.textContent = `${percent}%`;
+        progressFill.style.width = `${percent}%`;
+        statusBox.classList.toggle('ready', percent >= 100 && panoReady);
+      }
+
+      function waitFor(target, eventName) {
+        return new Promise((resolve, reject) => {
+          const onEvent = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = () => {
+            cleanup();
+            reject(new Error(`video ${eventName} failed`));
+          };
+          const cleanup = () => {
+            target.removeEventListener(eventName, onEvent);
+            target.removeEventListener('error', onError);
+          };
+          target.addEventListener(eventName, onEvent, { once: true });
+          target.addEventListener('error', onError, { once: true });
+        });
+      }
+
+      async function ensureMetadata() {
+        if (video.readyState >= 1 && video.videoWidth > 0) return;
+        await waitFor(video, 'loadedmetadata');
+      }
+
+      async function seekTo(time) {
+        if (Math.abs(video.currentTime - time) < 0.025 && video.readyState >= 2) return;
+        const done = waitFor(video, 'seeked');
+        video.currentTime = time;
+        await done;
+      }
+
+      function drawPlaceholder() {
+        const w = view.width;
+        const h = view.height;
+        ctx.clearRect(0, 0, w, h);
+        const gradient = ctx.createRadialGradient(w * 0.5, h * 0.45, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.7);
+        gradient.addColorStop(0, '#1d2834');
+        gradient.addColorStop(0.62, '#090d12');
+        gradient.addColorStop(1, '#05070a');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = 'rgba(247, 243, 234, 0.78)';
+        ctx.font = `${Math.max(15, Math.round(w / 54))}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('点击“生成全景”开始', w / 2, h / 2);
+      }
+
+      function drawWrappedImage(sx, sy, sw, sh, dx, dy, dw, dh) {
+        const pw = stripCanvas.width;
+        let start = ((sx % pw) + pw) % pw;
+        let remaining = sw;
+        let destX = dx;
+
+        while (remaining > 0.5) {
+          const take = Math.min(remaining, pw - start);
+          ctx.drawImage(stripCanvas, start, sy, take, sh, destX, dy, dw * (take / sw), dh);
+          remaining -= take;
+          destX += dw * (take / sw);
+          start = 0;
+        }
+      }
+
+      function drawWrappedSlice(source, dx, dy, dw, dh) {
+        const pw = stripCanvas.width;
+        let x = dx;
+        if (x < 0) {
+          stripCtx.drawImage(source, 0, 0, source.width, source.height, x + pw, dy, dw, dh);
+        }
+        if (x + dw > pw) {
+          stripCtx.drawImage(source, 0, 0, source.width, source.height, x - pw, dy, dw, dh);
+        }
+        stripCtx.drawImage(source, 0, 0, source.width, source.height, x, dy, dw, dh);
+      }
+
+      function render() {
+        if (!panoReady) {
+          drawPlaceholder();
+          return;
+        }
+
+        const vw = view.width;
+        const vh = view.height;
+        const pw = stripCanvas.width;
+        const ph = stripCanvas.height;
+        const sourceW = Math.max(24, pw * (fov / 360));
+        const sourceH = Math.min(ph, sourceW * (vh / vw));
+        const sx = yaw * pw - sourceW / 2;
+        const sy = Math.max(0, Math.min(ph - sourceH, pitch * ph - sourceH / 2));
+
+        ctx.clearRect(0, 0, vw, vh);
+        drawWrappedImage(sx, sy, sourceW, sourceH, 0, 0, vw, vh);
+
+        const vignette = ctx.createRadialGradient(vw * 0.5, vh * 0.5, Math.min(vw, vh) * 0.1, vw * 0.5, vh * 0.5, Math.max(vw, vh) * 0.72);
+        vignette.addColorStop(0, 'rgba(0,0,0,0)');
+        vignette.addColorStop(1, 'rgba(0,0,0,0.22)');
+        ctx.fillStyle = vignette;
+        ctx.fillRect(0, 0, vw, vh);
+      }
+
+      async function buildPanorama() {
+        if (isBuilding) return;
+        isBuilding = true;
+        panoReady = false;
+        buildButton.disabled = true;
+        saveButton.disabled = true;
+        statusBox.classList.remove('ready');
+        setProgress('读取视频', 0.02);
+
+        try {
+          await ensureMetadata();
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const duration = Math.max(0.1, video.duration || 0.1);
+          const sampleCount = Math.min(420, Math.max(220, Math.round(duration * 24)));
+          const workingHeight = Math.min(vh, 960);
+          const scale = workingHeight / vh;
+          const workingWidth = Math.max(1, Math.round(vw * scale));
+          const sliceWidth = Math.max(8, Math.round(workingWidth * 0.045));
+          const cropX = Math.floor((workingWidth - sliceWidth) / 2);
+          const targetWidth = Math.min(12288, Math.max(7600, sampleCount * Math.round(workingWidth * 0.045)));
+          const columnWidth = targetWidth / sampleCount;
+          const blendedWidth = Math.max(sliceWidth, Math.ceil(columnWidth * 2.2));
+
+          sourceCanvas.width = workingWidth;
+          sourceCanvas.height = workingHeight;
+          sliceCanvas.width = sliceWidth;
+          sliceCanvas.height = workingHeight;
+          stripCanvas.width = Math.round(targetWidth);
+          stripCanvas.height = workingHeight;
+
+          stripCtx.fillStyle = '#05070a';
+          stripCtx.fillRect(0, 0, stripCanvas.width, stripCanvas.height);
+
+          for (let i = 0; i < sampleCount; i += 1) {
+            const t = duration * ((i + 0.5) / sampleCount);
+            await seekTo(Math.min(duration - 0.03, Math.max(0.03, t)));
+            sourceCtx.drawImage(video, 0, 0, workingWidth, workingHeight);
+            sliceCtx.clearRect(0, 0, sliceWidth, workingHeight);
+            sliceCtx.globalCompositeOperation = 'source-over';
+            sliceCtx.drawImage(sourceCanvas, cropX, 0, sliceWidth, workingHeight, 0, 0, sliceWidth, workingHeight);
+            const feather = sliceCtx.createLinearGradient(0, 0, sliceWidth, 0);
+            feather.addColorStop(0, 'rgba(0,0,0,0)');
+            feather.addColorStop(0.22, 'rgba(0,0,0,0.92)');
+            feather.addColorStop(0.5, 'rgba(0,0,0,1)');
+            feather.addColorStop(0.78, 'rgba(0,0,0,0.92)');
+            feather.addColorStop(1, 'rgba(0,0,0,0)');
+            sliceCtx.globalCompositeOperation = 'destination-in';
+            sliceCtx.fillStyle = feather;
+            sliceCtx.fillRect(0, 0, sliceWidth, workingHeight);
+            sliceCtx.globalCompositeOperation = 'source-over';
+
+            const centerX = i * columnWidth + columnWidth / 2;
+            drawWrappedSlice(sliceCanvas, centerX - blendedWidth / 2, 0, blendedWidth, workingHeight);
+            if (i % 2 === 0 || i === sampleCount - 1) {
+              setProgress('生成全景纹理', (i + 1) / sampleCount);
+              await new Promise(requestAnimationFrame);
+            }
+          }
+
+          yaw = 0.5;
+          pitch = 0.5;
+          fov = 82;
+          panoReady = true;
+          saveButton.disabled = false;
+          meta.textContent = `${sampleCount} 帧抽样 · ${stripCanvas.width}×${stripCanvas.height} 全景纹理`;
+          setProgress('全景已生成', 1);
+          render();
+        } catch (error) {
+          statusText.textContent = '生成失败：请点击“换视频”重新选择原视频';
+          statusCount.textContent = '';
+          progressFill.style.width = '0%';
+          meta.textContent = error.message || '无法读取视频';
+        } finally {
+          isBuilding = false;
+          buildButton.disabled = false;
+        }
+      }
+
+      function startDrag(x, y) {
+        if (!panoReady) return;
+        isDragging = true;
+        lastX = x;
+        lastY = y;
+      }
+
+      function updateDrag(x, y) {
+        if (!isDragging || !panoReady) return;
+        const dx = x - lastX;
+        const dy = y - lastY;
+        lastX = x;
+        lastY = y;
+        yaw = (yaw - dx / Math.max(1, view.clientWidth)) % 1;
+        if (yaw < 0) yaw += 1;
+        pitch = Math.max(0.18, Math.min(0.82, pitch + dy / Math.max(1, view.clientHeight)));
+        render();
+      }
+
+      function stopDrag() {
+        isDragging = false;
+      }
+
+      buildButton.addEventListener('click', buildPanorama);
+
+      saveButton.addEventListener('click', () => {
+        if (!panoReady) return;
+        const link = document.createElement('a');
+        link.download = 'panorama-strip.jpg';
+        link.href = stripCanvas.toDataURL('image/jpeg', 0.92);
+        link.click();
+      });
+
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        panoReady = false;
+        video.src = URL.createObjectURL(file);
+        meta.textContent = file.name;
+        setProgress('等待生成', 0);
+        render();
+      });
+
+      view.addEventListener('mousedown', (event) => startDrag(event.clientX, event.clientY));
+      window.addEventListener('mousemove', (event) => updateDrag(event.clientX, event.clientY));
+      window.addEventListener('mouseup', stopDrag);
+      view.addEventListener('touchstart', (event) => {
+        const touch = event.touches[0];
+        if (touch) startDrag(touch.clientX, touch.clientY);
+      }, { passive: true });
+      view.addEventListener('touchmove', (event) => {
+        const touch = event.touches[0];
+        if (touch) updateDrag(touch.clientX, touch.clientY);
+      }, { passive: true });
+      window.addEventListener('touchend', stopDrag);
+      view.addEventListener('wheel', (event) => {
+        if (!panoReady) return;
+        event.preventDefault();
+        fov = Math.max(42, Math.min(130, fov + Math.sign(event.deltaY) * 5));
+        render();
+      }, { passive: false });
+
+      window.addEventListener('resize', () => {
+        cancelAnimationFrame(animationId);
+        animationId = requestAnimationFrame(resize);
+      });
+
+      resize();
+      video.addEventListener('loadedmetadata', () => {
+        meta.textContent = `${video.videoWidth}×${video.videoHeight} · ${video.duration.toFixed(1)} 秒`;
+      });
+    })();
+  </script>
+</div>
+</body>
+</html>
